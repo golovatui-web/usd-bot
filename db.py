@@ -1,5 +1,5 @@
 """
-Проста SQLite-база для зберігання оброблених статей.
+Проста SQLite-база для зберігання оброблених статей і закладок користувачів.
 Файл бази (usd_bot.db) створюється автоматично поруч зі скриптом.
 """
 
@@ -33,24 +33,35 @@ def init_db():
                 journal TEXT,
                 pub_date TEXT,
                 url TEXT,
-                summary TEXT,
+                conclusion TEXT,
+                description TEXT,
                 evidence_level TEXT,
-                evidence_reason TEXT,
                 posted_to_channel INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_topic ON articles(topic_key)")
+
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_topic ON articles(topic_key)"
+            """
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                pmid TEXT NOT NULL,
+                title TEXT,
+                url TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, pmid)
+            )
+            """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bookmark_user ON bookmarks(user_id)")
 
 
 def article_exists(pmid: str) -> bool:
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM articles WHERE pmid = ?", (pmid,)
-        ).fetchone()
+        row = conn.execute("SELECT 1 FROM articles WHERE pmid = ?", (pmid,)).fetchone()
         return row is not None
 
 
@@ -61,33 +72,37 @@ def save_article(
     journal: str,
     pub_date: str,
     url: str,
-    summary: str,
+    conclusion: str,
+    description: str,
     evidence_level: str,
-    evidence_reason: str,
 ):
     with get_conn() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO articles
-            (pmid, topic_key, title, journal, pub_date, url, summary,
-             evidence_level, evidence_reason, created_at)
+            (pmid, topic_key, title, journal, pub_date, url, conclusion,
+             description, evidence_level, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                pmid, topic_key, title, journal, pub_date, url, summary,
-                evidence_level, evidence_reason, datetime.utcnow().isoformat(),
+                pmid, topic_key, title, journal, pub_date, url, conclusion,
+                description, evidence_level, datetime.utcnow().isoformat(),
             ),
         )
 
 
+def get_article_by_pmid(pmid: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM articles WHERE pmid = ?", (pmid,)).fetchone()
+        return dict(row) if row else None
+
+
 def mark_posted(pmid: str):
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE articles SET posted_to_channel = 1 WHERE pmid = ?", (pmid,)
-        )
+        conn.execute("UPDATE articles SET posted_to_channel = 1 WHERE pmid = ?", (pmid,))
 
 
-def get_unposted_articles(limit: int = 20):
+def get_unposted_articles(limit: int = 100):
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM articles WHERE posted_to_channel = 0 ORDER BY created_at ASC LIMIT ?",
@@ -111,10 +126,10 @@ def search_articles(keyword: str, limit: int = 10):
         rows = conn.execute(
             """
             SELECT * FROM articles
-            WHERE title LIKE ? OR summary LIKE ?
+            WHERE title LIKE ? OR description LIKE ? OR conclusion LIKE ?
             ORDER BY created_at DESC LIMIT ?
             """,
-            (like, like, limit),
+            (like, like, like, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -123,5 +138,25 @@ def get_recent_articles(limit: int = 10):
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM articles ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def add_bookmark(user_id: int, pmid: str, title: str, url: str):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO bookmarks (user_id, pmid, title, url, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, pmid, title, url, datetime.utcnow().isoformat()),
+        )
+
+
+def get_bookmarks(user_id: int, limit: int = 30):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bookmarks WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]

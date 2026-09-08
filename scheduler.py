@@ -4,9 +4,14 @@
 Для кожної теми з config/topics.py:
   1. шукає нові статті в PubMed за останні LOOKBACK_DAYS днів
   2. пропускає ті, що вже є в базі (за PMID)
-  3. для нових — генерує анотацію + рівень доказовості через Claude
+  3. для нових — генерує висновок+опис+рівень доказовості через Claude
   4. зберігає в базу
-  5. публікує накопичені непубліковані статті в канал
+  5. публікує накопичені непубліковані статті в канал під заголовком дня
+
+MAX_ARTICLES_PER_DAY — жорсткий запобіжник: навіть якщо PubMed раптом поверне аномально
+багато нових статей за один прохід (наприклад, після тривалої паузи бота), опрацювання
+зупиниться на цій кількості за один запуск. Це напряму обмежує максимальні витрати на
+Claude API за один цикл, незалежно від того, скільки тем "спрацювали" одночасно.
 """
 
 import os
@@ -21,13 +26,18 @@ from summarizer import summarize_article
 
 
 async def check_and_process_new_articles(context: ContextTypes.DEFAULT_TYPE):
-    lookback_days = int(os.environ.get("LOOKBACK_DAYS", 14))
+    lookback_days = int(os.environ.get("LOOKBACK_DAYS", 3))
     max_per_topic = int(os.environ.get("MAX_ARTICLES_PER_TOPIC", 5))
+    max_per_day = int(os.environ.get("MAX_ARTICLES_PER_DAY", 40))
     ncbi_key = os.environ.get("NCBI_API_KEY", "")
 
     total_new = 0
 
     for topic_key, topic_data in TOPICS.items():
+        if total_new >= max_per_day:
+            print(f"Досягнуто денний ліміт {max_per_day} статей — решта тем перевіриться наступного разу.")
+            break
+
         try:
             articles = fetch_new_articles_for_topic(
                 query=topic_data["query"],
@@ -40,6 +50,8 @@ async def check_and_process_new_articles(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         for art in articles:
+            if total_new >= max_per_day:
+                break
             if not art["pmid"] or db.article_exists(art["pmid"]):
                 continue
 
@@ -54,14 +66,13 @@ async def check_and_process_new_articles(context: ContextTypes.DEFAULT_TYPE):
                 journal=art["journal"],
                 pub_date=art["pub_date"],
                 url=art["url"],
-                summary=result["summary"],
+                conclusion=result["conclusion"],
+                description=result["description"],
                 evidence_level=result["evidence_level"],
-                evidence_reason=result["evidence_reason"],
             )
             total_new += 1
             print(f"[{topic_key}] Додано: {art['title'][:70]}...")
 
     print(f"Перевірку завершено. Нових статей: {total_new}.")
 
-    # публікуємо все, що накопичилось і ще не опубліковано
     await post_digest_to_channel(context)
