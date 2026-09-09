@@ -2,14 +2,24 @@
 Точка входу. Запускає:
   1. Telegram-бота (обробка команд у приватних чатах)
   2. Фонову періодичну задачу (перевірка PubMed + анотування + публікація в канал)
+     раз на день, у фіксований час за київським часом.
 
 Запуск: python main.py
 """
 
-import os
-from datetime import timedelta
-
+# load_dotenv() МАЄ бути першим — до будь-яких локальних імпортів (db, bot, scheduler).
+# Причина: summarizer.py створює Anthropic-клієнт ОДИН РАЗ на рівні модуля і читає
+# ANTHROPIC_API_KEY з os.environ вже під час імпорту. Якби load_dotenv() викликався
+# після імпортів (як раніше), ключа ще не було б у середовищі — і імпорт впав би
+# з KeyError ще до старту програми.
 from dotenv import load_dotenv
+
+load_dotenv()
+
+import datetime as dt
+import os
+from zoneinfo import ZoneInfo
+
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 import db
@@ -23,8 +33,6 @@ from bot import (
     handle_save_callback,
 )
 from scheduler import check_and_process_new_articles
-
-load_dotenv()
 
 REQUIRED_ENV_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID", "ANTHROPIC_API_KEY"]
 
@@ -43,7 +51,7 @@ def main():
     db.init_db()
 
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    interval_hours = float(os.environ.get("CHECK_INTERVAL_HOURS", 24))
+    digest_hour = int(os.environ.get("DIGEST_HOUR_KYIV", 8))
 
     application = Application.builder().token(token).build()
 
@@ -55,14 +63,16 @@ def main():
     application.add_handler(CommandHandler("saved", cmd_saved))
     application.add_handler(CallbackQueryHandler(handle_save_callback, pattern=r"^save:"))
 
-    # перша перевірка через 15 секунд після старту, далі — кожні CHECK_INTERVAL_HOURS годин
-    application.job_queue.run_repeating(
+    # Фіксований час щодня за київським часом (а не "кожні 24 год від старту сервісу") —
+    # так дата в заголовку дня в каналі й сам час публікації не "пливуть" після кожного
+    # рестарту/деплою/збою, і не залежать від того, в якому часовому поясі працює сервер
+    # (Oracle Cloud VM зазвичай у UTC).
+    application.job_queue.run_daily(
         check_and_process_new_articles,
-        interval=timedelta(hours=interval_hours),
-        first=15,
+        time=dt.time(hour=digest_hour, minute=0, tzinfo=ZoneInfo("Europe/Kyiv")),
     )
 
-    print("Бот запущено. Очікую на команди та виконую періодичні перевірки...")
+    print(f"Бот запущено. Щоденна перевірка о {digest_hour}:00 за Києвом. Очікую на команди...")
     application.run_polling(allowed_updates=["message", "callback_query"])
 
 

@@ -21,6 +21,11 @@ def get_conn():
         conn.close()
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
 def init_db():
     with get_conn() as conn:
         conn.execute(
@@ -36,11 +41,33 @@ def init_db():
                 conclusion TEXT,
                 description TEXT,
                 evidence_level TEXT,
+                practical_relevance TEXT DEFAULT 'Low',
                 posted_to_channel INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
         )
+
+        # Захисні міграції — БД уже в проді, тому ЛИШЕ ALTER TABLE з попередньою
+        # перевіркою PRAGMA table_info, ніколи DROP/CREATE наново.
+
+        # 1) Дуже стара схема (summary/evidence_reason, до появи conclusion/description).
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(articles)")}
+        if "summary" in cols and "conclusion" not in cols:
+            conn.execute("ALTER TABLE articles RENAME COLUMN summary TO conclusion")
+            conn.execute("ALTER TABLE articles ADD COLUMN description TEXT")
+            print("db: міграція схеми articles (summary → conclusion + description)")
+
+        # 2) practical_relevance (новіша колонка, могла бути відсутня в БД, створеній
+        #    попередньою версією без гібридної fast/premium-схеми). Старі статті
+        #    отримають DEFAULT 'Low' — просто не матимуть бейджа 🩺 в каналі, жодні
+        #    наявні дані не губляться.
+        if not _column_exists(conn, "articles", "practical_relevance"):
+            conn.execute(
+                "ALTER TABLE articles ADD COLUMN practical_relevance TEXT DEFAULT 'Low'"
+            )
+            print("db: міграція схеми articles (додано practical_relevance)")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_topic ON articles(topic_key)")
 
         conn.execute(
@@ -75,18 +102,20 @@ def save_article(
     conclusion: str,
     description: str,
     evidence_level: str,
+    practical_relevance: str = "Low",
 ):
     with get_conn() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO articles
             (pmid, topic_key, title, journal, pub_date, url, conclusion,
-             description, evidence_level, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             description, evidence_level, practical_relevance, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 pmid, topic_key, title, journal, pub_date, url, conclusion,
-                description, evidence_level, datetime.utcnow().isoformat(),
+                description, evidence_level, practical_relevance,
+                datetime.utcnow().isoformat(),
             ),
         )
 
@@ -142,15 +171,17 @@ def get_recent_articles(limit: int = 10):
         return [dict(r) for r in rows]
 
 
-def add_bookmark(user_id: int, pmid: str, title: str, url: str):
+def add_bookmark(user_id: int, pmid: str, title: str, url: str) -> bool:
+    """Повертає True, якщо це новий запис, False — якщо користувач вже зберігав цю статтю раніше."""
     with get_conn() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT OR IGNORE INTO bookmarks (user_id, pmid, title, url, created_at)
             VALUES (?, ?, ?, ?, ?)
             """,
             (user_id, pmid, title, url, datetime.utcnow().isoformat()),
         )
+        return cursor.rowcount > 0
 
 
 def get_bookmarks(user_id: int, limit: int = 30):

@@ -9,7 +9,7 @@
 
 import time
 import xml.etree.ElementTree as ET
-from typing import List, Dict
+from typing import Dict, List
 
 import requests
 
@@ -18,13 +18,18 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 
 def search_pubmed(query: str, days_back: int, retmax: int, api_key: str = "") -> List[str]:
-    """Повертає список PMID, опублікованих за останні `days_back` днів."""
+    """Повертає список PMID, опублікованих за останні `days_back` днів.
+
+    sort=pub_date — сортування за фактичною датою публікації статті (а не датою її
+    індексації в PubMed, яку позначає "most recent"): саме це нам потрібно, щоб при
+    обмеженні retmax потрапляли дійсно найновіші публікації, а не довільна підмножина.
+    """
     params = {
         "db": "pubmed",
         "term": query,
         "retmax": retmax,
         "retmode": "json",
-        "sort": "most+recent",
+        "sort": "pub_date",
         "datetype": "pdat",
         "reldate": days_back,
     }
@@ -34,18 +39,26 @@ def search_pubmed(query: str, days_back: int, retmax: int, api_key: str = "") ->
     resp = requests.get(ESEARCH_URL, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    return data.get("esearchresult", {}).get("idlist", [])
+    idlist = data.get("esearchresult", {}).get("idlist", [])
+    # На випадок рідкісних дублікатів у відповіді PubMed — прибираємо, зберігаючи порядок.
+    return list(dict.fromkeys(idlist))
 
 
 def _text_or_none(el):
-    return el.text.strip() if el is not None and el.text else None
+    """Бере ВЕСЬ текст елемента, включно з тим, що йде після вкладених inline-тегів
+    (<i>, <sub>, <sup>, <b> — часто зустрічаються в назвах генів, хімічних формулах).
+    Звичайний el.text віддав би лише текст ДО першого вкладеного тега."""
+    if el is None:
+        return None
+    text = "".join(el.itertext()).strip()
+    return text or None
 
 
 def _extract_abstract(article_el) -> str:
     parts = []
     for ab in article_el.findall(".//Abstract/AbstractText"):
         label = ab.get("Label")
-        text = ab.text or ""
+        text = "".join(ab.itertext()).strip()
         parts.append(f"{label}: {text}" if label else text)
     return " ".join(parts).strip()
 
