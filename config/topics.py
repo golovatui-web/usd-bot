@@ -126,9 +126,10 @@ def get_topic_hashtag(topic_key: str) -> str:
 
 
 def list_topics_text() -> str:
-    """Форматований список тем для команди /topics у боті."""
+    """Форматований список тем для команди /topics у боті (HTML — узгоджено з форматом
+    format_article у bot.py, щоб не змішувати різні parse_mode в одному боті)."""
     lines = ["📋 Доступні теми:\n"]
     for key, data in TOPICS.items():
-        lines.append(f"• `{key}` — {data['label']}")
-    lines.append("\nПриклад: `/topic thyroid`")
+        lines.append(f"• <code>{key}</code> — {data['label']}")
+    lines.append("\nПриклад: <code>/topic thyroid</code>")
     return "\n".join(lines)
