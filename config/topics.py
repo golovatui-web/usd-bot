@@ -10,38 +10,22 @@
 Щоб додати/змінити тему — просто відредагуйте цей словник.
 Ключ теми (наприклад "thyroid") використовується як ідентифікатор у командах бота
 та в базі даних, тому після першого запуску краще не перейменовувати ключі.
+
+Порядок словника МАЄ значення: при перетині тем (одна стаття підходить під кілька
+запитів) виграє та, що йде РАНІШЕ в цьому переліку (глобальна унікальність pmid —
+див. коментар у scheduler.py). Тому органо-специфічні теми йдуть перед "наскрізними"
+(pediatric, oncology, acute_emergency) — щоб, наприклад, стаття про пухлину печінки
+отримала хештег #печінка, а не #онкологія.
+
+21 тема (скорочено з 24: прибрано ceus/elastography/lung_pocus — надто вузькі за
+обсягом публікацій для щоденного дайджесту; можна повернути пізніше, якщо захочете).
 """
 
 TOPICS = {
-    "vessels": {
-        "label": "Судини шиї і голови",
-        "hashtag": "#судини_шиї_та_голови",
-        "query": (
-            '("carotid artery"[Title/Abstract] OR "vertebral artery"[Title/Abstract] '
-            'OR "neck vessels"[Title/Abstract] OR "transcranial doppler"[Title/Abstract] '
-            'OR "carotid stenosis"[Title/Abstract]) '
-            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR doppler[Title/Abstract])'
-        ),
-    },
-    "soft_tissue": {
-        "label": "М'які тканини",
-        "hashtag": "#мякі_тканини",
-        "query": (
-            '"soft tissue"[Title/Abstract] '
-            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
-        ),
-    },
-    "salivary": {
-        "label": "Слинні залози",
-        "hashtag": "#слинні_залози",
-        "query": (
-            '"salivary gland"[Title/Abstract] '
-            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
-        ),
-    },
+    # ==================== Основні ====================
     "thyroid": {
-        "label": "Щитоподібна залоза (вузли, біопсія, РЧА)",
-        "hashtag": "#щитоподібна_залоза",
+        "label": "Щитоподібна залоза",
+        "hashtag": "#щитоподібна",
         "query": (
             '"thyroid"[Title/Abstract] AND '
             '(ultrasound[Title/Abstract] OR "fine needle"[Title/Abstract] OR biopsy[Title/Abstract] '
@@ -49,30 +33,63 @@ TOPICS = {
         ),
     },
     "breast_lymph": {
-        "label": "Молочні залози, лімфатичні вузли, біопсії",
-        "hashtag": "#молочні_залози_та_лімфовузли",
+        "label": "Молочні залози та лімфовузли",
+        "hashtag": "#молочна_залоза",
         "query": (
             '(breast[Title/Abstract] OR "lymph node"[Title/Abstract] OR axillary[Title/Abstract]) '
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR biopsy[Title/Abstract] '
             'OR "core needle"[Title/Abstract])'
         ),
     },
-    "abdomen_kidney": {
-        "label": "Черевна порожнина, нирки",
-        "hashtag": "#черевна_порожнина_та_нирки",
+    "abdomen": {
+        "label": "Черевна порожнина (загальне)",
+        "hashtag": "#черевна_порожнина",
+        # NOT liver/kidney/pancreas — щоб не дублювати їхні окремі теми нижче
+        # (без цього виключення "abdominal ultrasound" ловило б майже все підряд).
         "query": (
-            '(abdomen[Title/Abstract] OR abdominal[Title/Abstract] OR kidney[Title/Abstract] '
-            'OR renal[Title/Abstract] OR hepatic[Title/Abstract] OR liver[Title/Abstract]) '
+            '(abdomen[Title/Abstract] OR abdominal[Title/Abstract] OR "acute abdomen"[Title/Abstract] '
+            'OR spleen[Title/Abstract] OR splenic[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract]) '
+            'NOT (liver[Title/Abstract] OR hepatic[Title/Abstract] OR kidney[Title/Abstract] '
+            'OR renal[Title/Abstract] OR pancreas[Title/Abstract] OR pancreatic[Title/Abstract])'
+        ),
+    },
+    "liver": {
+        "label": "Печінка",
+        "hashtag": "#печінка",
+        "query": (
+            '(liver[Title/Abstract] OR hepatic[Title/Abstract] OR "fatty liver"[Title/Abstract] '
+            'OR cirrhosis[Title/Abstract] OR steatosis[Title/Abstract] '
+            'OR "hepatocellular carcinoma"[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR elastography[Title/Abstract])'
+        ),
+    },
+    "kidney": {
+        "label": "Нирки",
+        "hashtag": "#нирки",
+        "query": (
+            '(kidney[Title/Abstract] OR renal[Title/Abstract] OR "renal artery"[Title/Abstract] '
+            'OR nephrolithiasis[Title/Abstract] OR hydronephrosis[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR doppler[Title/Abstract])'
+        ),
+    },
+    "gynecology": {
+        "label": "Гінекологія",
+        "hashtag": "#гінекологія",
+        "query": (
+            '(gynecologic[Title/Abstract] OR gynecological[Title/Abstract] OR pelvic[Title/Abstract] '
+            'OR ovarian[Title/Abstract] OR uterine[Title/Abstract] OR endometrial[Title/Abstract]) '
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
-    "acute_onco": {
-        "label": "Гострі та онкологічні захворювання",
-        "hashtag": "#гострі_та_онкологічні_стани",
+    "obstetrics": {
+        "label": "Акушерство",
+        "hashtag": "#акушерство",
         "query": (
-            '(acute[Title/Abstract] OR oncology[Title/Abstract] OR oncologic[Title/Abstract] '
-            'OR tumor[Title/Abstract] OR malignancy[Title/Abstract] OR metastasis[Title/Abstract]) '
-            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR "point-of-care"[Title/Abstract])'
+            '(obstetric[Title/Abstract] OR fetal[Title/Abstract] OR prenatal[Title/Abstract] '
+            'OR "fetal biometry"[Title/Abstract] OR "nuchal translucency"[Title/Abstract] '
+            'OR pregnancy[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
     "urology": {
@@ -84,12 +101,51 @@ TOPICS = {
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
-    "gynecology": {
-        "label": "Гінекологія",
-        "hashtag": "#гінекологія",
+    "vessels": {
+        "label": "Судини шиї і голови",
+        "hashtag": "#судини_шиї",
         "query": (
-            '(gynecologic[Title/Abstract] OR gynecological[Title/Abstract] OR pelvic[Title/Abstract] '
-            'OR ovarian[Title/Abstract] OR uterine[Title/Abstract] OR endometrial[Title/Abstract]) '
+            '("carotid artery"[Title/Abstract] OR "vertebral artery"[Title/Abstract] '
+            'OR "neck vessels"[Title/Abstract] OR "transcranial doppler"[Title/Abstract] '
+            'OR "carotid stenosis"[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR doppler[Title/Abstract])'
+        ),
+    },
+    "guidelines": {
+        "label": "Рекомендації асоціацій (EFSUMB/AIUM/ESR/ACR)",
+        "hashtag": "#рекомендації",
+        "query": (
+            '(guideline[Title/Abstract] OR guidelines[Title/Abstract] OR recommendation*[Title/Abstract] '
+            'OR consensus[Title/Abstract] OR "practice parameter"[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
+        ),
+    },
+
+    # ==================== Цінні доповнення ====================
+    "vascular": {
+        "label": "Периферичні судини",
+        "hashtag": "#периферичні_судини",
+        "query": (
+            '("deep vein thrombosis"[Title/Abstract] OR "venous insufficiency"[Title/Abstract] '
+            'OR "peripheral artery disease"[Title/Abstract] OR "peripheral vascular"[Title/Abstract] '
+            'OR "lower limb ischemia"[Title/Abstract] OR varicose[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR duplex[Title/Abstract])'
+        ),
+    },
+    "msk": {
+        "label": "Опорно-рухова система",
+        "hashtag": "#опорно_руховий",
+        "query": (
+            '(musculoskeletal[Title/Abstract] OR tendon[Title/Abstract] OR ligament[Title/Abstract] '
+            'OR "rotator cuff"[Title/Abstract] OR joint[Title/Abstract] OR muscle[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR sonography[Title/Abstract])'
+        ),
+    },
+    "soft_tissue": {
+        "label": "М'які тканини",
+        "hashtag": "#мякі_тканини",
+        "query": (
+            '"soft tissue"[Title/Abstract] '
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
@@ -103,12 +159,68 @@ TOPICS = {
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
-    "guidelines": {
-        "label": "Нові рекомендації та протоколи асоціацій (EFSUMB/AIUM/ESR/ACR)",
-        "hashtag": "#рекомендації_асоціацій",
+    "pancreas_gi": {
+        "label": "Підшлункова залоза та ШКТ",
+        "hashtag": "#підшлункова_шкт",
         "query": (
-            '(guideline[Title/Abstract] OR guidelines[Title/Abstract] OR recommendation*[Title/Abstract] '
-            'OR consensus[Title/Abstract] OR "practice parameter"[Title/Abstract]) '
+            '(pancreas[Title/Abstract] OR pancreatic[Title/Abstract] OR "gastrointestinal tract"[Title/Abstract] '
+            'OR bowel[Title/Abstract] OR intestinal[Title/Abstract] OR appendicitis[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
+        ),
+    },
+    "oncology": {
+        "label": "Онкологічне УЗД",
+        "hashtag": "#онкологія",
+        "query": (
+            '(oncology[Title/Abstract] OR oncologic[Title/Abstract] OR tumor[Title/Abstract] '
+            'OR malignancy[Title/Abstract] OR metastasis[Title/Abstract] OR "cancer screening"[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] '
+            'OR "contrast-enhanced ultrasound"[Title/Abstract])'
+        ),
+    },
+    "acute_emergency": {
+        "label": "Невідкладне УЗД",
+        "hashtag": "#невідкладна_допомога",
+        "query": (
+            '(emergency[Title/Abstract] OR "point-of-care"[Title/Abstract] OR POCUS[Title/Abstract] '
+            'OR trauma[Title/Abstract] OR FAST[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR sonography[Title/Abstract])'
+        ),
+    },
+
+    # ==================== Нішеві ====================
+    "peripheral_nerves": {
+        "label": "Периферичні нерви",
+        "hashtag": "#периферичні_нерви",
+        "query": (
+            '("peripheral nerve"[Title/Abstract] OR "nerve entrapment"[Title/Abstract] '
+            'OR "carpal tunnel"[Title/Abstract] OR neuropathy[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR sonography[Title/Abstract])'
+        ),
+    },
+    "pediatric": {
+        "label": "Педіатричне УЗД",
+        "hashtag": "#педіатрія",
+        "query": (
+            '(pediatric[Title/Abstract] OR paediatric[Title/Abstract] OR infant[Title/Abstract] '
+            'OR neonatal[Title/Abstract]) '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract] OR sonography[Title/Abstract])'
+        ),
+    },
+    "salivary": {
+        "label": "Слинні залози",
+        "hashtag": "#слинні_залози",
+        "query": (
+            '"salivary gland"[Title/Abstract] '
+            'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
+        ),
+    },
+    "head_neck": {
+        "label": "Голова та шия (інше)",
+        "hashtag": "#голова_шия",
+        "query": (
+            '(parathyroid[Title/Abstract] OR larynx[Title/Abstract] OR laryngeal[Title/Abstract] '
+            'OR "cervical lymph node"[Title/Abstract] OR "neck mass"[Title/Abstract]) '
             'AND (ultrasound[Title/Abstract] OR ultrasonography[Title/Abstract])'
         ),
     },
