@@ -1,5 +1,5 @@
 """
-Обробники команд Telegram-бота + функція публікації дайджесту в канал.
+Обробники команд Telegram-бота + публікація дайджесту в канал.
 """
 
 import asyncio
@@ -15,43 +15,59 @@ import db
 from config.topics import TOPICS, get_topic_hashtag, get_topic_label, list_topics_text
 
 LEVEL_DOT = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}
-# Бейдж "практично важливо" — показуємо лише для practical_relevance == "High", щоб він
-# лишався рідкісним і справді привертав увагу (не для "Medium", інакше знецінюється).
-# Якщо захочете показувати і для Medium — розширте PRACTICAL_BADGE_LEVELS нижче.
 PRACTICAL_BADGE_LEVELS = ("High",)
 PRACTICAL_BADGE = "🩺"
 
-POST_THROTTLE_SECONDS = 1  # пауза між постами в канал — захист від Telegram flood-limit
+POST_THROTTLE_SECONDS = 1
 
 
 def format_article(article: dict) -> str:
-    """Формат: [гурток доказовості + бейдж практичної цінності] заголовок, потім
-    висновок (виділено), опис, доказовість — кольором, практична цінність — бейджем.
-
-    ParseMode.HTML + html.escape() для всіх полів, що приходять із зовнішнього джерела
-    (PubMed) або від Claude — без цього символи типу _ * [ ] у назві статті ламають
-    legacy Markdown-парсер Telegram (BadRequest: Can't parse entities).
+    """HTML-пост. Усі динамічні поля — html.escape(). НІКОЛИ Markdown:
+    символи _ * [ ] у назвах з PubMed ламають legacy-парсер Telegram.
     """
-    dot = LEVEL_DOT.get(article["evidence_level"], "⚪")
+    dot = LEVEL_DOT.get(article.get("evidence_level") or "Low", "⚪")
     if article.get("practical_relevance") in PRACTICAL_BADGE_LEVELS:
         prefix = f"{dot} {PRACTICAL_BADGE}"
     else:
         prefix = dot
     hashtag = get_topic_hashtag(article.get("topic_key", ""))
 
-    title = html.escape(article["title"])
-    conclusion = html.escape(article["conclusion"])
-    description = html.escape(article["description"])
-    journal = html.escape(article.get("journal") or "")
-    pub_date = html.escape(str(article.get("pub_date") or ""))
-    url = html.escape(article["url"], quote=True)
+    display_title = article.get("title_ua") or article.get("title") or ""
+    original_title = article.get("title") or ""
+    takeaway = (
+        article.get("clinical_takeaway")
+        or article.get("conclusion")
+        or ""
+    )
+    summary = article.get("summary_ua") or article.get("description") or ""
+    justification = article.get("evidence_justification") or ""
+    journal = article.get("journal") or ""
+    pub_date = str(article.get("pub_date") or "")
+    url = article.get("url") or ""
+
+    title_html = html.escape(display_title)
+    takeaway_html = html.escape(takeaway)
+    summary_html = html.escape(summary)
+    journal_html = html.escape(journal)
+    pub_date_html = html.escape(pub_date)
+    url_html = html.escape(url, quote=True)
+
+    extra_title = ""
+    if original_title and display_title and original_title.strip() != display_title.strip():
+        extra_title = f"<i>{html.escape(original_title)}</i>\n\n"
+
+    justification_block = ""
+    if justification:
+        justification_block = f"{html.escape(justification)}\n\n"
 
     return (
-        f"{prefix} <b>{title}</b>\n\n"
-        f"💡 <b>{conclusion}</b>\n\n"
-        f"{description}\n\n"
+        f"{prefix} <b>{title_html}</b>\n\n"
+        f"{extra_title}"
+        f"💡 <b>{takeaway_html}</b>\n\n"
+        f"{summary_html}\n\n"
+        f"{justification_block}"
         f"{hashtag}\n"
-        f'🔗 <a href="{url}">Джерело</a> · {journal}, {pub_date}'
+        f'🔗 <a href="{url_html}">Джерело</a> · {journal_html}, {pub_date_html}'
     )
 
 
@@ -62,20 +78,19 @@ def save_button(pmid: str) -> InlineKeyboardMarkup:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Друкуємо user_id в лог — щоб адміну було легко знайти свій ID для ADMIN_CHAT_ID
-    # (heartbeat-налаштування), не встановлюючи окремих сторонніх ботів.
     print(f"cmd_start: user_id={update.effective_user.id} (@{update.effective_user.username})")
 
     text = (
-        "👋 Вітаю! Я бот-дайджест новин УЗД-діагностики.\n\n"
-        "🩺 поряд із гуртком = стаття практично застосовна на прийомі.\n\n"
+        "Вітаю. Я бот-дайджест новин УЗД-діагностики.\n\n"
+        "Гурток біля заголовка — рівень доказовості (High / Medium / Low).\n"
+        "Символ стетоскопа поряд — стаття практично застосовна на прийомі.\n\n"
         "Команди:\n"
         "/topics — список тем\n"
         "/topic <ключ> — останні статті за темою (напр. /topic thyroid)\n"
         "/search <слово> — пошук за ключовим словом\n"
-        "/recent — останні опрацьовані статті за всіма темами\n"
-        "/saved — ваші збережені статті (натискайте 🔖 під постами в каналі)\n\n"
-        f"Ваш Telegram ID: {update.effective_user.id} (знадобиться для ADMIN_CHAT_ID, якщо це ви)"
+        "/recent — останні опрацьовані статті\n"
+        "/saved — ваші збережені статті (кнопка під постами в каналі)\n\n"
+        f"Ваш Telegram ID: {update.effective_user.id} (для ADMIN_CHAT_ID)"
     )
     await update.message.reply_text(text)
 
@@ -104,7 +119,7 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(f"📚 {get_topic_label(topic_key)}:")
+    await update.message.reply_text(f"{get_topic_label(topic_key)}:")
     for art in articles:
         await update.message.reply_text(
             format_article(art),
@@ -117,7 +132,8 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Вкажіть слово для пошуку, напр.: <code>/search РЧА</code>", parse_mode=ParseMode.HTML
+            "Вкажіть слово для пошуку, напр.: <code>/search РЧА</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -127,7 +143,10 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нічого не знайдено.")
         return
 
-    await update.message.reply_text(f"🔎 Результати за запитом «{keyword}»:")
+    safe_kw = html.escape(keyword)
+    await update.message.reply_text(
+        f"Результати за запитом «{safe_kw}»:", parse_mode=ParseMode.HTML
+    )
     for art in results:
         await update.message.reply_text(
             format_article(art),
@@ -156,11 +175,11 @@ async def cmd_saved(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bookmarks = db.get_bookmarks(user_id, limit=30)
     if not bookmarks:
         await update.message.reply_text(
-            "У вас поки немає збережених статей. Натискайте 🔖 «Зберегти» під постами в каналі."
+            "У вас поки немає збережених статей. Натискайте «Зберегти» під постами в каналі."
         )
         return
 
-    lines = ["🔖 Ваші збережені статті:\n"]
+    lines = ["Ваші збережені статті:\n"]
     for b in bookmarks:
         title = html.escape(b["title"])
         url = html.escape(b["url"], quote=True)
@@ -171,8 +190,6 @@ async def cmd_saved(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробляє натискання кнопки 🔖 Зберегти під постом у каналі (працює для будь-кого,
-    навіть якщо людина ще не писала боту в особисті — answer_callback_query не потребує цього)."""
     query = update.callback_query
     pmid = query.data.split(":", 1)[1]
 
@@ -181,10 +198,11 @@ async def handle_save_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Статтю не знайдено в базі.", show_alert=True)
         return
 
-    is_new = db.add_bookmark(query.from_user.id, pmid, article["title"], article["url"])
+    bookmark_title = article.get("title_ua") or article["title"]
+    is_new = db.add_bookmark(query.from_user.id, pmid, bookmark_title, article["url"])
     if is_new:
         await query.answer(
-            "🔖 Збережено! Перегляньте список командою /saved у приватному чаті з ботом.",
+            "Збережено. Перегляньте список командою /saved у приватному чаті з ботом.",
             show_alert=True,
         )
     else:
@@ -192,14 +210,11 @@ async def handle_save_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def post_digest_to_channel(context: ContextTypes.DEFAULT_TYPE):
-    """Публікує в канал усі ще не опубліковані статті одним блоком під заголовком дня.
-    Викликається планувальником (main.py) раз на день.
+    """Публікує неопубліковані статті блоком під заголовком дня.
 
-    - Заголовок дня надсилається зі звуковим сповіщенням (це і є сигнал "дайджест готовий").
-    - Самі статті — БЕЗ сповіщення (disable_notification=True), щоб 20-40 постів поспіль
-      не завалили підписників пушами й не спричинили масові відписки.
-    - Пауза між постами (POST_THROTTLE_SECONDS) — захист від Telegram flood-limit для
-      каналів (орієнтовно безпечно до ~20 повідомлень/хв).
+    - Заголовок дня — зі сповіщенням.
+    - Самі статті — disable_notification=True.
+    - Пауза POST_THROTTLE_SECONDS між постами — захист від flood-limit.
     """
     channel_id = os.environ["TELEGRAM_CHANNEL_ID"]
     pending = db.get_unposted_articles(limit=100)
@@ -233,18 +248,22 @@ async def post_digest_to_channel(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(POST_THROTTLE_SECONDS)
 
 
-async def send_heartbeat(context: ContextTypes.DEFAULT_TYPE, total_new: int):
-    """Раз на день шле адміну коротке підтвердження, що бот живий і скільки нового
-    опрацьовано. Якщо ADMIN_CHAT_ID не задано — просто нічого не робить (не обов'язково).
-    Якщо бот "зациклено падає" (наприклад, скінчився баланс Anthropic) — це помітно
-    одразу з відсутності heartbeat, а не через тижні мовчазної тиші в каналі."""
+async def send_heartbeat(
+    context: ContextTypes.DEFAULT_TYPE,
+    total_new: int,
+    pending: int = 0,
+    failed: int = 0,
+):
     admin_id = os.environ.get("ADMIN_CHAT_ID", "").strip()
     if not admin_id:
         return
     try:
         await context.bot.send_message(
             chat_id=admin_id,
-            text=f"✅ Живий. Оброблено нових статей сьогодні: {total_new}.",
+            text=(
+                f"Живий. Оброблено сьогодні: {total_new}. "
+                f"Черга pending: {pending}, failed: {failed}."
+            ),
             disable_notification=True,
         )
     except Exception as e:  # noqa: BLE001

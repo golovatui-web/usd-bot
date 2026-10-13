@@ -1,28 +1,20 @@
 """
-Періодична задача, яку викликає JobQueue бота (див. main.py), раз на день у фіксований
-час (run_daily у main.py, а не "кожні N годин від старту сервісу" — щоб час публікації
-не "плавав" після кожного рестарту/деплою).
+Три задачі планувальника (main.py):
 
-Для кожної теми з config/topics.py:
-  1. шукає нові статті в PubMed за останні LOOKBACK_DAYS днів
-  2. пропускає ті, що вже є в базі (за PMID)
-  3. для нових — генерує висновок+опис+рівень доказовості+практичну цінність через Claude
-  4. зберігає в базу
-  5. публікує накопичені непубліковані статті в канал під заголовком дня
-  6. шле heartbeat адміну (якщо налаштовано ADMIN_CHAT_ID)
+1. PubMed Feeder — кожні FEED_INTERVAL_MINUTES (типово 15) бере
+   FEED_TOPICS_PER_TICK (типово 3) теми за круговим циклом, кладе нові PMID
+   у article_queue зі статусом pending. Без викликів Gemini.
+2. AI Worker — кожні WORKER_INTERVAL_SECONDS (типово 15) обробляє 1 pending
+   статтю (див. worker.py). Gemini викликається з паузою 6 с і backoff на 429.
+3. Publisher — раз на день о DIGEST_HOUR_KYIV публікує накопичене в канал
+   і шле heartbeat адміну.
 
-MAX_ARTICLES_PER_DAY — жорсткий запобіжник: навіть якщо PubMed раптом поверне аномально
-багато нових статей за один прохід, опрацювання зупиниться на цій кількості. Це напряму
-обмежує максимальні витрати на Claude API за один цикл.
-
-ВАЖЛИВО про продуктивність: PubMed-запити (requests) та виклики Claude API (синхронний
-Anthropic SDK, тепер потенційно ДВІЧІ на статтю через гібридну fast/premium-схему в
-summarizer.py) — блокуючі, синхронні операції. Якби вони виконувались прямо в цій async-
-функції, event loop бота був би заблокований на весь час перевірки, і команди /topics,
-/search тощо не відповідали б у цей час. Тому вся важка синхронна логіка винесена в
-_fetch_and_summarize_all_topics() і викликається через asyncio.to_thread — в окремому
-потоці, не блокуючи бота.
+Важка синхронна частина (PubMed requests, Gemini SDK) ЗАВЖДИ у звичайній def
+і викликається через asyncio.to_thread — інакше event loop бота блокується
+і команди /topics, /search не відповідають.
 """
+
+from __future__ import annotations
 
 import asyncio
 import os
@@ -31,76 +23,89 @@ from telegram.ext import ContextTypes
 
 import db
 from bot import post_digest_to_channel, send_heartbeat
-from config.topics import TOPICS
+from config.topics import TOPIC_KEYS, TOPICS
 from fetcher import fetch_new_articles_for_topic
-from summarizer import summarize_article
+from worker import process_one_pending_article
+
+RR_STATE_KEY = "rr_topic_index"
 
 
-def _fetch_and_summarize_all_topics() -> int:
-    """Синхронна важка частина циклу. Виконується в окремому потоці (див.
-    check_and_process_new_articles нижче) — саме тому це звичайна `def`, а не `async def`."""
-    lookback_days = int(os.environ.get("LOOKBACK_DAYS", 5))
-    max_per_topic = int(os.environ.get("MAX_ARTICLES_PER_TOPIC", 5))
-    max_per_day = int(os.environ.get("MAX_ARTICLES_PER_DAY", 40))
+def _feed_next_topics() -> int:
+    """Синхронна частина фідера. Повертає кількість доданих у чергу PMID."""
+    lookback_days = int(os.environ.get("LOOKBACK_DAYS", "5"))
+    max_per_topic = int(os.environ.get("MAX_ARTICLES_PER_TOPIC", "3"))
+    per_tick = int(os.environ.get("FEED_TOPICS_PER_TICK", "3"))
     ncbi_key = os.environ.get("NCBI_API_KEY", "")
 
-    total_new = 0
+    n_topics = len(TOPIC_KEYS)
+    if n_topics == 0:
+        return 0
 
-    for topic_key, topic_data in TOPICS.items():
-        if total_new >= max_per_day:
-            print(f"Досягнуто денний ліміт {max_per_day} статей — решта тем перевіриться наступного разу.")
-            break
+    try:
+        start = int(db.get_state(RR_STATE_KEY, "0")) % n_topics
+    except ValueError:
+        start = 0
 
+    added = 0
+    for i in range(per_tick):
+        key = TOPIC_KEYS[(start + i) % n_topics]
+        topic = TOPICS[key]
         try:
             articles = fetch_new_articles_for_topic(
-                query=topic_data["query"],
+                query=topic["query"],
                 days_back=lookback_days,
                 retmax=max_per_topic,
                 api_key=ncbi_key,
             )
         except Exception as e:  # noqa: BLE001
-            print(f"[{topic_key}] Помилка запиту до PubMed: {e}")
+            print(f"[{key}] Помилка запиту до PubMed: {e}")
             continue
 
+        topic_added = 0
         for art in articles:
-            if total_new >= max_per_day:
-                break
-            if not art["pmid"]:
+            pmid = art.get("pmid")
+            if not pmid:
                 continue
-            if db.article_exists(art["pmid"]):
-                # Стаття вже опрацьована — можливо, під ІНШОЮ темою, чиї критерії теж
-                # збіглися раніше в переліку TOPICS (теми в config/topics.py навмисно
-                # широкі й перетинаються, напр. "biopsy" є і в thyroid, і в breast_lymph).
-                # Свідомий вибір дизайну: pmid глобально унікальний у таблиці articles,
-                # тому перша тема, що "забрала" статтю в цьому проході, і залишається
-                # її темою/хештегом — це гарантує, що жоден пост не продублюється в
-                # каналі і жоден виклик Claude не витрачається повторно на той самий PMID.
+            if db.article_exists(pmid) or db.queue_has_pmid(pmid):
                 continue
-
-            result = summarize_article(
-                title=art["title"], abstract=art["abstract"], journal=art["journal"]
-            )
-
-            db.save_article(
-                pmid=art["pmid"],
-                topic_key=topic_key,
+            if db.enqueue_article(
+                pmid=pmid,
+                topic_key=key,
                 title=art["title"],
                 journal=art["journal"],
                 pub_date=art["pub_date"],
                 url=art["url"],
-                conclusion=result["conclusion"],
-                description=result["description"],
-                evidence_level=result["evidence_level"],
-                practical_relevance=result.get("practical_relevance", "Low"),
-            )
-            total_new += 1
-            print(f"[{topic_key}] Додано: {art['title'][:70]}...")
+                abstract=art["abstract"],
+            ):
+                topic_added += 1
+                added += 1
+        print(f"[{key}] у чергу: {topic_added}")
 
-    print(f"Перевірку завершено. Нових статей: {total_new}.")
-    return total_new
+    db.set_state(RR_STATE_KEY, str((start + per_tick) % n_topics))
+    print(f"Фідер: додано {added}. pending={db.count_queue('pending')}")
+    return added
 
 
-async def check_and_process_new_articles(context: ContextTypes.DEFAULT_TYPE):
-    total_new = await asyncio.to_thread(_fetch_and_summarize_all_topics)
+async def feed_pubmed_round_robin(context: ContextTypes.DEFAULT_TYPE):
+    await asyncio.to_thread(_feed_next_topics)
+
+
+async def process_queue_tick(context: ContextTypes.DEFAULT_TYPE):
+    status = await asyncio.to_thread(process_one_pending_article)
+    if status not in ("idle", "capped"):
+        print(f"worker tick: {status}")
+
+
+async def publish_digest_and_heartbeat(context: ContextTypes.DEFAULT_TYPE):
+    total_new = db.count_processed_today()
     await post_digest_to_channel(context)
-    await send_heartbeat(context, total_new)
+    pending = db.count_queue("pending")
+    failed = db.count_queue("failed")
+    await send_heartbeat(context, total_new, pending=pending, failed=failed)
+
+
+# Зворотна сумісність зі старим іменем джоби (якщо хтось лишив його в unit-файлі).
+async def check_and_process_new_articles(context: ContextTypes.DEFAULT_TYPE):
+    await feed_pubmed_round_robin(context)
+    await process_queue_tick(context)
+    await publish_digest_and_heartbeat(context)

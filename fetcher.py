@@ -1,10 +1,10 @@
 """
-Отримання нових статей із PubMed (безкоштовне E-utilities API, ключ не обов'язковий,
-але з ним вищі ліміти запитів: https://www.ncbi.nlm.nih.gov/books/NBK25497/).
+Отримання нових статей із PubMed (E-utilities). Повний текст НЕ завантажується —
+лише публічна анотація, яку далі перефразовує Gemini.
 
-Логіка навмисно проста: esearch -> список PMID -> efetch -> деталі (назва, анотація,
-журнал, дата, DOI). Повний текст статей НЕ завантажується — лише публічно доступна
-анотація (abstract), яку далі перефразовує Claude у summarizer.py.
+Базовий ультразвуковий фільтр додається до КОЖНОГО тематичного запиту
+(див. compose_pubmed_query), щоб MeSH-запити в config/topics.py лишались
+чистими й не дублювали "ultrasound" у кожному рядку.
 """
 
 import time
@@ -16,17 +16,25 @@ import requests
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
+ULTRASOUND_FILTER = (
+    '("Ultrasonography"[Mesh] OR "ultrasound"[tiab] OR "sonography"[tiab])'
+)
+
+
+def compose_pubmed_query(topic_query: str) -> str:
+    """Обгортає тематичний MeSH/tiab-запит обов'язковим ультразвуковим фільтром."""
+    return f"({topic_query}) AND {ULTRASOUND_FILTER}"
+
 
 def search_pubmed(query: str, days_back: int, retmax: int, api_key: str = "") -> List[str]:
-    """Повертає список PMID, опублікованих за останні `days_back` днів.
+    """Повертає список PMID за останні `days_back` днів.
 
-    sort=pub_date — сортування за фактичною датою публікації статті (а не датою її
-    індексації в PubMed, яку позначає "most recent"): саме це нам потрібно, щоб при
-    обмеженні retmax потрапляли дійсно найновіші публікації, а не довільна підмножина.
+    sort=pub_date — за фактичною датою публікації (а не "most recent", яке
+    для ESearch невалідне і сортує за датою індексації).
     """
     params = {
         "db": "pubmed",
-        "term": query,
+        "term": compose_pubmed_query(query),
         "retmax": retmax,
         "retmode": "json",
         "sort": "pub_date",
@@ -40,13 +48,11 @@ def search_pubmed(query: str, days_back: int, retmax: int, api_key: str = "") ->
     resp.raise_for_status()
     data = resp.json()
     idlist = data.get("esearchresult", {}).get("idlist", [])
-    # На випадок рідкісних дублікатів у відповіді PubMed — прибираємо, зберігаючи порядок.
     return list(dict.fromkeys(idlist))
 
 
 def _text_or_none(el):
-    """Бере ВЕСЬ текст елемента, включно з тим, що йде після вкладених inline-тегів
-    (<i>, <sub>, <sup>, <b> — часто зустрічаються в назвах генів, хімічних формулах).
+    """Весь текст елемента, включно з фрагментами після вкладених <i>/<sub>/<sup>.
     Звичайний el.text віддав би лише текст ДО першого вкладеного тега."""
     if el is None:
         return None
@@ -64,7 +70,6 @@ def _extract_abstract(article_el) -> str:
 
 
 def fetch_details(pmids: List[str], api_key: str = "") -> List[Dict]:
-    """Повертає деталі статей (назва, анотація, журнал, дата, посилання) за списком PMID."""
     if not pmids:
         return []
 
@@ -93,7 +98,6 @@ def fetch_details(pmids: List[str], api_key: str = "") -> List[Dict]:
         pub_date = year or medline_date or "н/д"
 
         if not abstract:
-            # Пропускаємо статті без анотації — без неї нема з чого робити коротке резюме
             continue
 
         results.append(
@@ -111,9 +115,9 @@ def fetch_details(pmids: List[str], api_key: str = "") -> List[Dict]:
 
 
 def fetch_new_articles_for_topic(query: str, days_back: int, retmax: int, api_key: str = "") -> List[Dict]:
-    """Зручна обгортка: пошук + деталі для однієї теми, з невеликою паузою (NCBI rate limit)."""
+    """Пошук + деталі для однієї теми, з паузою під NCBI rate limit (~3 req/s без ключа)."""
     pmids = search_pubmed(query, days_back, retmax, api_key)
-    time.sleep(0.4)  # NCBI просить не більше ~3 запитів/сек без ключа
+    time.sleep(0.4)
     details = fetch_details(pmids, api_key)
     time.sleep(0.4)
     return details
